@@ -25,12 +25,13 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        curl -sSL -o schema.json https://json.schemastore.org/${{ inputs.schema }}.json
-        FILES=$(find . -type f \( -name "*.json" -o -name "*.yml" -o -name "*.yaml" \))
+        export SCHEMA_FILE="schemastore-${{ inputs.schema }}.json"
+        curl -sSL -o "$SCHEMA_FILE" https://json.schemastore.org/${{ inputs.schema }}.json
+        FILES=$(find . -type f \( -name "*.json" -o -name "*.yml" -o -name "*.yaml" \) ! -name "$SCHEMA_FILE")
         if [ -n "${{ inputs.file-pattern }}" ]; then
           FILES=$(echo "$FILES" | grep -E "${{ inputs.file-pattern }}")
         fi
         echo "$FILES" | while read -r file; do
-          ajv validate -s schema.json --strict-tuples false --strict-types false -d "$file"
+          ajv validate -s "$SCHEMA_FILE" --strict-tuples false --strict-types false -d "$file"
         done
 
