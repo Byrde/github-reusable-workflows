@@ -71,7 +71,7 @@ runs:
         
         # Download schema once
         SCHEMA_FILE=$(mktemp)
-        if ! curl -sf "$SCHEMA_URL" -o "$SCHEMA_FILE"; then
+        if ! curl -sfL "$SCHEMA_URL" -o "$SCHEMA_FILE"; then
           echo "Failed to download schema from $SCHEMA_URL"
           rm -f "$SCHEMA_FILE"
           exit 1
