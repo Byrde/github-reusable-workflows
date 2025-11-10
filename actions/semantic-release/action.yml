@@ -1,0 +1,238 @@
+---
+name: semantic-release
+description: "Automate versioning and publishing to GitHub Releases"
+inputs:
+  token:
+    description: "GitHub token with permissions to create releases"
+    required: true
+    default: ${{ github.token }}
+  sha-prefix:
+    description: "Prefix for the SHA of the commit"
+    required: false
+    default: "-"
+  sha-suffix:
+    description: "Suffix for the SHA of the commit"
+    required: false
+    default: ""
+  should-create-release:
+    description: "Whether to create a release"
+    required: false
+    default: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+  release-branch:
+    description: "The branch to use for release analysis (used in dry-run mode)"
+    required: false
+    default: "main"
+  component-path:
+    description: "Optional component path for path-based tags (e.g., 'workflows/terraform-ci' or 'actions/semantic-release'). When set, tags will be created as '<component-path>/<tag-prefix>${version}'"
+    required: false
+    default: ""
+  tag-prefix:
+    description: "Optional tag prefix (default: 'v'). Combined with component-path if provided, resulting in tags like '<component-path>/<tag-prefix>${version}' or just '<tag-prefix>${version}'"
+    required: false
+    default: "v"
+outputs:
+  version:
+    description: "The version of the release"
+    value: ${{ steps.version.outputs.version }}
+  logs:
+    description: "The semantic-release logs"
+    value: ${{ steps.semantic-release.outputs.logs }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+        token: ${{ inputs.token }}
+
+    - name: Semantic Release Directory
+      shell: bash
+      run: ls ${{ github.action_path }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Dependencies
+      shell: bash
+      run: npm install --prefix ${{ github.action_path }}
+
+    - name: Normalize component path and tag prefix
+      id: normalize
+      shell: bash
+      run: |
+        COMPONENT_PATH="${{ inputs.component-path }}"
+        TAG_PREFIX_INPUT="${{ inputs.tag-prefix }}"
+
+        # Strip .github/ prefix if present (for tag compatibility)
+        # Git tags cannot start with dots
+        COMPONENT_PATH="${COMPONENT_PATH#.github/}"
+
+        # Build tag prefix (component-path/tag-prefix or just tag-prefix)
+        TAG_PREFIX="${COMPONENT_PATH}${COMPONENT_PATH:+/}${TAG_PREFIX_INPUT:-v}"
+
+        echo "component_path=$COMPONENT_PATH" >> $GITHUB_OUTPUT
+        echo "tag_prefix=$TAG_PREFIX" >> $GITHUB_OUTPUT
+        echo "Normalized component path: $COMPONENT_PATH"
+        echo "Tag prefix: $TAG_PREFIX"
+
+    - name: Create .releaserc.json
+      shell: bash
+      run: |
+        if [ ! -f .releaserc.json ]; then
+          # For dry-run mode (PRs), analyze as if on release branch
+          # For actual releases, use the current branch
+          if [[ "${{ inputs.should-create-release }}" == "true" ]]; then
+            BRANCH="${{ github.ref_name }}"
+          else
+            BRANCH="${{ inputs.release-branch }}"
+          fi
+
+          # Copy template and replace placeholders
+          cp ${{ github.action_path }}/.releaserc.json .releaserc.json
+          sed -i "s/BRANCH_PLACEHOLDER/$BRANCH/g" .releaserc.json
+          echo "Tag prefix: ${{ steps.normalize.outputs.tag_prefix }}"
+          sed -i "s|TAG_PREFIX_PLACEHOLDER|${{ steps.normalize.outputs.tag_prefix }}|g" .releaserc.json
+        else
+          echo ".releaserc.json already exists, skip default .releaserc.json creation!"
+        fi
+
+    - name: Check for existing version
+      id: existing-version
+      shell: bash
+      run: |
+        if CURRENT_VERSION=$(git describe --contains 2>/dev/null); then
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Check if component has any tags
+      id: check-tags
+      shell: bash
+      run: |
+        COMPONENT_PATH="${{ steps.normalize.outputs.component_path }}"
+
+        if [ -n "$COMPONENT_PATH" ]; then
+          # Check if any tags exist for this component
+          if git tag -l "${COMPONENT_PATH}/v*" | grep -q .; then
+            echo "has_tags=true" >> $GITHUB_OUTPUT
+            echo "Component has existing tags"
+          else
+            echo "has_tags=false" >> $GITHUB_OUTPUT
+            echo "Component has no existing tags - will create v0.1.0"
+          fi
+        else
+          # No component path, check for any version tags
+          if git tag -l "v*" | grep -q .; then
+            echo "has_tags=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_tags=false" >> $GITHUB_OUTPUT
+          fi
+        fi
+
+    - name: Create initial v0.1.0 release for new components
+      if: steps.existing-version.outputs.exists == 'false' && steps.check-tags.outputs.has_tags == 'false' && inputs.should-create-release == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        INITIAL_TAG="${{ steps.normalize.outputs.tag_prefix }}0.1.0"
+
+        echo "Creating initial release tag: $INITIAL_TAG"
+
+        # Configure git user for tagging
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Create annotated tag
+        git tag -a "$INITIAL_TAG" -m "chore(release): initial release v0.1.0"
+        git push origin "$INITIAL_TAG"
+
+        # Create GitHub release
+        gh release create "$INITIAL_TAG" \
+          --title "$INITIAL_TAG" \
+          --notes "Initial release" \
+          --target "${{ github.sha }}"
+
+        echo "NEXT_RELEASE_VERSION=0.1.0" >> $GITHUB_ENV
+        echo "INITIAL_RELEASE_CREATED=true" >> $GITHUB_ENV
+
+    - name: Run Semantic Release
+      if: steps.existing-version.outputs.exists == 'false' && steps.check-tags.outputs.has_tags == 'true'
+      id: semantic-release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        set +e  # Don't exit on error, we want to capture output
+
+        if [[ "${{ inputs.should-create-release }}" == "true" ]]; then
+          # Actual release
+          OUTPUT=$(npx --prefix ${{ github.action_path }} semantic-release 2>&1)
+          EXIT_CODE=$?
+        else
+          # Dry-run mode
+          OUTPUT=$(npx --prefix ${{ github.action_path }} semantic-release --dry-run 2>&1)
+          EXIT_CODE=$?
+        fi
+
+        echo "logs<<EOF" >> $GITHUB_OUTPUT
+        echo "$OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+        echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+        # For actual releases, fail if semantic-release failed
+        if [[ "${{ inputs.should-create-release }}" == "true" ]] && [[ $EXIT_CODE -ne 0 ]]; then
+          echo "Semantic release failed with exit code $EXIT_CODE"
+          echo "$OUTPUT"
+          exit $EXIT_CODE
+        fi
+
+    - name: Resolve Version
+      id: version
+      shell: bash
+      run: |
+        # If version already exists on this commit, use it
+        if [[ "${{ steps.existing-version.outputs.exists }}" == "true" ]]; then
+          VERSION="${{ steps.existing-version.outputs.version }}"
+          echo "Using existing version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Check if semantic-release set NEXT_RELEASE_VERSION via exec plugin
+        if [[ -n "$NEXT_RELEASE_VERSION" ]]; then
+          echo "Version from semantic-release: $NEXT_RELEASE_VERSION"
+          echo "version=$NEXT_RELEASE_VERSION" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Fallback: try to extract version from semantic-release output
+        OUTPUT="${{ steps.semantic-release.outputs.logs }}"
+
+        if echo "$OUTPUT" | grep -q "The next release version is"; then
+          # Dry-run mode - extract predicted version
+          VERSION=$(echo "$OUTPUT" | grep "The next release version is" | sed -E 's/.*The next release version is ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          echo "Predicted version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        elif echo "$OUTPUT" | grep -q "Published release"; then
+          # Actual release - extract published version
+          VERSION=$(echo "$OUTPUT" | grep "Published release" | sed -E 's/.*release ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          echo "Published version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        else
+          # Fallback to interim version with SHA
+          LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1) 2>/dev/null || echo "0.0.0")
+          VERSION="$LATEST_TAG${{ inputs.sha-prefix }}${GITHUB_SHA:0:7}${{ inputs.sha-suffix }}"
+          echo "Interim version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        fi

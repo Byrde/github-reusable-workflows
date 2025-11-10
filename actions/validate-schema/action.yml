@@ -1,0 +1,193 @@
+---
+name: validate-schema
+description: "Recursively validate all JSON/YAML/YML files against schemas from schemastore.org"
+inputs:
+  directory:
+    description: "Directory to validate (relative to workspace root)"
+    required: false
+    default: "."
+  schema:
+    description: "Schema name from schemastore.org (e.g. 'github-workflow') or full URL to schema. If not provided, auto-detects based on filename"
+    required: false
+    default: ""
+  file-pattern:
+    description: "Regex pattern to match files (e.g. '.*\\.yml$' for YAML files only). If not provided, matches all JSON/YAML/YML files"
+    required: false
+    default: ""
+  fail-on-error:
+    description: "Whether to fail the action if validation errors are found"
+    required: false
+    default: "true"
+outputs:
+  valid:
+    description: "Whether all files passed validation"
+    value: ${{ steps.validate.outputs.valid }}
+  errors:
+    description: "Number of validation errors found"
+    value: ${{ steps.validate.outputs.errors }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install ajv-cli
+      shell: bash
+      run: npm install --prefix ${{ github.action_path }}
+
+    - name: Run Schema Validation
+      id: validate
+      shell: bash
+      run: |
+        cd "${{ inputs.directory }}"
+        
+        SCHEMA_INPUT="${{ inputs.schema }}"
+        
+        # Determine schema URL
+        if [ -n "$SCHEMA_INPUT" ]; then
+          # Check if it's a full URL or schema name
+          if [[ "$SCHEMA_INPUT" =~ ^https?:// ]]; then
+            SCHEMA_URL="$SCHEMA_INPUT"
+            echo "Using schema URL: $SCHEMA_URL"
+          else
+            # Look up schema by name in catalog
+            echo "Fetching schema catalog from schemastore.org..."
+            CATALOG=$(curl -s https://www.schemastore.org/api/json/catalog.json)
+            SCHEMA_URL=$(echo "$CATALOG" | node -e "
+              const catalog = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+              const schemaName = process.argv[1];
+              
+              for (const schema of catalog.schemas) {
+                if (schema.name.toLowerCase() === schemaName.toLowerCase()) {
+                  console.log(schema.url);
+                  process.exit(0);
+                }
+              }
+            " "$SCHEMA_INPUT" 2>/dev/null)
+            
+            if [ -z "$SCHEMA_URL" ]; then
+              echo "Schema '$SCHEMA_INPUT' not found in schemastore.org catalog"
+              exit 1
+            fi
+            echo "Using schema: $SCHEMA_INPUT ($SCHEMA_URL)"
+          fi
+        fi
+        
+        # Find all JSON/YAML files
+        FILES=$(find . -type f \( -name "*.json" -o -name "*.yml" -o -name "*.yaml" \) ! -path "*/node_modules/*" ! -name "package-lock.json")
+        
+        # Apply file pattern filter if provided
+        FILE_PATTERN="${{ inputs.file-pattern }}"
+        if [ -n "$FILE_PATTERN" ]; then
+          echo "Applying file pattern filter: $FILE_PATTERN"
+          FILES=$(echo "$FILES" | grep -E "$FILE_PATTERN")
+        fi
+        
+        if [ -z "$FILES" ]; then
+          echo "No JSON/YAML files found to validate"
+          echo "valid=true" >> $GITHUB_OUTPUT
+          echo "errors=0" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        TOTAL_FILES=$(echo "$FILES" | wc -l | tr -d ' ')
+        echo "Found $TOTAL_FILES files to validate"
+        echo ""
+        
+        ERRORS=0
+        VALIDATED=0
+        SKIPPED=0
+        
+        # Validate each file
+        while IFS= read -r file; do
+          FILENAME=$(basename "$file")
+          
+          # Determine schema URL for this file
+          if [ -z "$SCHEMA_INPUT" ]; then
+            # Auto-detect schema from catalog
+            if [ -z "$CATALOG" ]; then
+              echo "Fetching schema catalog from schemastore.org..."
+              CATALOG=$(curl -s https://www.schemastore.org/api/json/catalog.json)
+            fi
+            
+            FILE_SCHEMA_URL=$(echo "$CATALOG" | node -e "
+              const catalog = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+              const filename = process.argv[1];
+              
+              for (const schema of catalog.schemas) {
+                if (!schema.fileMatch) continue;
+                
+                for (const pattern of schema.fileMatch) {
+                  const regexPattern = pattern
+                    .replace(/\\\./g, '\\\\.')
+                    .replace(/\\*/g, '.*')
+                    .replace(/\\?/g, '.');
+                  const regex = new RegExp('^' + regexPattern + '$', 'i');
+                  
+                  if (regex.test(filename)) {
+                    console.log(schema.url);
+                    process.exit(0);
+                  }
+                }
+              }
+            " "$FILENAME" 2>/dev/null)
+            
+            if [ -z "$FILE_SCHEMA_URL" ]; then
+              echo "$file - No matching schema found"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+          else
+            # Use the specified schema for all files
+            FILE_SCHEMA_URL="$SCHEMA_URL"
+          fi
+          
+          VALIDATED=$((VALIDATED + 1))
+          
+          # Download and validate against schema
+          SCHEMA_FILE=$(mktemp)
+          curl -s "$FILE_SCHEMA_URL" -o "$SCHEMA_FILE"
+          
+          if npx --prefix ${{ github.action_path }} ajv validate -s "$SCHEMA_FILE" -d "$file" --spec=draft2020 -c ajv-formats &>/dev/null; then
+            echo "$file - Valid"
+          else
+            echo "$file - Invalid"
+            npx --prefix ${{ github.action_path }} ajv validate -s "$SCHEMA_FILE" -d "$file" --spec=draft2020 -c ajv-formats 2>&1 | grep -A 5 "error"
+            ERRORS=$((ERRORS + 1))
+          fi
+          
+          rm -f "$SCHEMA_FILE"
+        done <<< "$FILES"
+        
+        echo ""
+        echo "=================================================="
+        echo "Validation Summary:"
+        echo "=================================================="
+        echo "Total files found: $TOTAL_FILES"
+        echo "Files validated: $VALIDATED"
+        echo "Files skipped (no schema): $SKIPPED"
+        echo "Valid files: $((VALIDATED - ERRORS))"
+        echo "Invalid files: $ERRORS"
+        echo "=================================================="
+        echo ""
+        
+        # Set outputs
+        if [ $ERRORS -eq 0 ]; then
+          echo "valid=true" >> $GITHUB_OUTPUT
+          echo "All files validated successfully!"
+        else
+          echo "valid=false" >> $GITHUB_OUTPUT
+          if [ "${{ inputs.fail-on-error }}" = "true" ]; then
+            echo "Validation failed!"
+            echo "errors=$ERRORS" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "Validation completed with errors (fail-on-error is disabled)"
+          fi
+        fi
+        
+        echo "errors=$ERRORS" >> $GITHUB_OUTPUT
+
