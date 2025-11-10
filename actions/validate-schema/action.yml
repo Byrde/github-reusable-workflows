@@ -79,12 +79,31 @@ runs:
         
         # Validate each file
         while IFS= read -r file; do
-          if npx --prefix ${{ github.action_path }} ajv validate -s "$SCHEMA_FILE" -d "$file" --spec=draft2020 -c ajv-formats &>/dev/null; then
+          # Convert YAML to JSON if needed
+          if [[ "$file" =~ \.(yml|yaml)$ ]]; then
+            JSON_FILE=$(mktemp)
+            NODE_PATH="${{ github.action_path }}/node_modules" node -e "
+              const yaml = require('js-yaml');
+              const fs = require('fs');
+              const content = yaml.load(fs.readFileSync('$file', 'utf8'));
+              console.log(JSON.stringify(content, null, 2));
+            " > "$JSON_FILE" 2>/dev/null
+            VALIDATE_FILE="$JSON_FILE"
+          else
+            VALIDATE_FILE="$file"
+          fi
+          
+          if npx --prefix ${{ github.action_path }} ajv validate -s "$SCHEMA_FILE" -d "$VALIDATE_FILE" --spec=draft2020 -c ajv-formats &>/dev/null; then
             echo "$file - Valid"
           else
             echo "$file - Invalid"
-            npx --prefix ${{ github.action_path }} ajv validate -s "$SCHEMA_FILE" -d "$file" --spec=draft2020 -c ajv-formats 2>&1 | grep -A 5 "error"
+            npx --prefix ${{ github.action_path }} ajv validate -s "$SCHEMA_FILE" -d "$VALIDATE_FILE" --spec=draft2020 -c ajv-formats 2>&1 | grep -A 5 "error"
             ERRORS=$((ERRORS + 1))
+          fi
+          
+          # Clean up temporary JSON file
+          if [[ "$file" =~ \.(yml|yaml)$ ]]; then
+            rm -f "$JSON_FILE"
           fi
         done <<< "$FILES"
         
