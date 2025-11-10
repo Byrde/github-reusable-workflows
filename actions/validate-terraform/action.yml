@@ -1,0 +1,101 @@
+---
+name: validate-terraform
+description: 'Validates all Terraform modules in the repository by running format check, init, and validate'
+inputs:
+  terraform_version:
+    description: 'Terraform version to use'
+    required: false
+    default: '>=1.7'
+  tf_api_token:
+    description: 'Terraform Cloud API token'
+    required: false
+    default: ""
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform w/ API Token
+      if: ${{ inputs.tf_api_token != '' }}
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        cli_config_credentials_token: ${{ inputs.tf_api_token }}
+
+    - name: Setup Terraform wo/ API Token
+      if: ${{ inputs.tf_api_token == '' }}
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+
+    - name: Find & Validate Modules
+      shell: bash
+      run: |
+        # Find all directories with main.tf
+        modules=($(find modules -name "main.tf" -type f | sed 's|/main.tf||' | sort))
+        failed_modules=()
+        successful_modules=()
+        echo "--------------------------------"
+        echo "Found ${#modules[@]} modules to validate"
+        echo "--------------------------------"
+        echo ""
+        
+        for module_dir in "${modules[@]}"; do
+          echo ""
+          echo "================================"
+          echo "Validating: $module_dir"
+          echo "================================"
+          
+          cd "$module_dir"
+          
+          # Format check
+          if ! terraform fmt -check -recursive .; then
+            echo "Format check failed for $module_dir"
+            failed_modules+=("$module_dir (format)")
+            cd - > /dev/null
+            continue
+          fi
+          echo "Format OK!"
+          
+          # Init
+          if ! terraform init -backend=false 2>&1; then
+            echo "Init failed for $module_dir"
+            failed_modules+=("$module_dir (init)")
+            cd - > /dev/null
+            continue
+          fi
+          echo "Init OK!"
+          
+          # Validate
+          if ! terraform validate 2>&1; then
+            echo "Validation failed for $module_dir"
+            failed_modules+=("$module_dir (validate)")
+            cd - > /dev/null
+            continue
+          fi
+          echo "Validation OK!"
+          echo ""
+          
+          successful_modules+=("$module_dir")
+          cd - > /dev/null
+        done
+        
+        echo ""
+        echo "================================"
+        echo "SUMMARY"
+        echo "================================"
+        echo "Successful: ${#successful_modules[@]}"
+        echo "Failed: ${#failed_modules[@]}"
+        
+        if [ ${#failed_modules[@]} -gt 0 ]; then
+          echo ""
+          echo "Failed modules:"
+          for module in "${failed_modules[@]}"; do
+            echo "  - $module"
+          done
+          exit 1
+        fi
+        
+        echo "All modules validated successfully!"
