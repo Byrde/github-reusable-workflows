@@ -27,7 +27,7 @@ outputs:
     value: ${{ steps.validate.outputs.errors }}
 
 runs:
-  using: 'composite'
+  using: composite
   steps:
     - name: Setup Node.js
       uses: actions/setup-node@v4
@@ -48,49 +48,8 @@ runs:
         
         # Determine schema URL
         if [ -n "$SCHEMA_INPUT" ]; then
-          # Check if it's a full URL or schema identifier
-          if [[ "$SCHEMA_INPUT" =~ ^https?:// ]]; then
-            SCHEMA_URL="$SCHEMA_INPUT"
-            echo "Using schema URL: $SCHEMA_URL"
-          else
-            # Map common schema identifiers to URLs
-            case "$SCHEMA_INPUT" in
-              github-workflow)
-                SCHEMA_URL="https://www.schemastore.org/github-workflow.json"
-                ;;
-              github-action)
-                SCHEMA_URL="https://www.schemastore.org/github-action.json"
-                ;;
-              package.json)
-                SCHEMA_URL="https://www.schemastore.org/package.json"
-                ;;
-              tsconfig)
-                SCHEMA_URL="https://www.schemastore.org/tsconfig.json"
-                ;;
-              *)
-                # Try looking up in catalog as fallback
-                echo "Fetching schema catalog from schemastore.org..."
-                CATALOG=$(curl -s https://www.schemastore.org/api/json/catalog.json)
-                SCHEMA_URL=$(echo "$CATALOG" | node -e "
-                  const catalog = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
-                  const schemaName = process.argv[1];
-                  
-                  for (const schema of catalog.schemas) {
-                    if (schema.name.toLowerCase() === schemaName.toLowerCase()) {
-                      console.log(schema.url);
-                      process.exit(0);
-                    }
-                  }
-                " "$SCHEMA_INPUT" 2>/dev/null)
-                
-                if [ -z "$SCHEMA_URL" ]; then
-                  echo "Schema '$SCHEMA_INPUT' not found"
-                  exit 1
-                fi
-                ;;
-            esac
-            echo "Using schema: $SCHEMA_INPUT ($SCHEMA_URL)"
-          fi
+          SCHEMA_URL="https://json.schemastore.org/${SCHEMA_INPUT}.json"
+          echo "Using schema: $SCHEMA_INPUT ($SCHEMA_URL)"
         fi
         
         # Find all JSON/YAML files
