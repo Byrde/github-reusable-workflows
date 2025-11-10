@@ -1,11 +1,11 @@
 ---
 name: validate-schema
-description: "Recursively validate all JSON/YAML/YML files against schemas from schemastore.org"
+description: "Validate JSON/YAML files against schemas from schemastore.org"
 inputs:
   schema:
     description: "Schema name from schemastore.org (e.g. 'github-workflow')"
     required: true
-  directory:
+  working-directory:
     description: "Directory to validate (relative to workspace root)"
     required: false
     default: "."
@@ -28,21 +28,15 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-
     - name: Install ajv-cli
       shell: bash
-      run: npm install --prefix ${{ github.action_path }}
+      run: npm install -g ajv-cli ajv-formats
 
-    - name: Run Schema Validation
+    - name: Validate Schema
       id: validate
       shell: bash
-      run: |
-        cd "${{ inputs.directory }}"
-        
+      working-directory: ${{ inputs.directory }}
+      run: |        
         SCHEMA_URL="https://json.schemastore.org/${{ inputs.schema }}.json"
         echo "Using schema: ${{ inputs.schema }} ($SCHEMA_URL)"
         
@@ -57,7 +51,7 @@ runs:
         fi
         
         if [ -z "$FILES" ]; then
-          echo "No JSON/YAML files found to validate"
+          echo "No files found to validate"
           echo "valid=true" >> $GITHUB_OUTPUT
           echo "errors=0" >> $GITHUB_OUTPUT
           exit 0
@@ -67,61 +61,35 @@ runs:
         echo "Found $TOTAL_FILES files to validate"
         echo ""
         
-        ERRORS=0
+        # Download schema
+        curl -sSL -o schema.json "$SCHEMA_URL"
         
-        # Download schema once
-        SCHEMA_FILE=$(mktemp)
-        if ! curl -sfL "$SCHEMA_URL" -o "$SCHEMA_FILE"; then
-          echo "Failed to download schema from $SCHEMA_URL"
-          rm -f "$SCHEMA_FILE"
-          exit 1
-        fi
+        ERRORS=0
         
         # Validate each file
         while IFS= read -r file; do
-          # Convert YAML to JSON if needed
-          if [[ "$file" =~ \.(yml|yaml)$ ]]; then
-            JSON_FILE=$(mktemp)
-            NODE_PATH="${{ github.action_path }}/node_modules" node -e "
-              const yaml = require('js-yaml');
-              const fs = require('fs');
-              const content = yaml.load(fs.readFileSync('$file', 'utf8'));
-              console.log(JSON.stringify(content, null, 2));
-            " > "$JSON_FILE" 2>/dev/null
-            VALIDATE_FILE="$JSON_FILE"
-          else
-            VALIDATE_FILE="$file"
-          fi
-          
-          if npx --prefix ${{ github.action_path }} ajv validate -s "$SCHEMA_FILE" -d "$VALIDATE_FILE" --spec=draft2020 -c ajv-formats &>/dev/null; then
+          if ajv validate -s schema.json --strict-tuples false --strict-types false -d "$file" &>/dev/null; then
             echo "$file - Valid"
           else
             echo "$file - Invalid"
-            npx --prefix ${{ github.action_path }} ajv validate -s "$SCHEMA_FILE" -d "$VALIDATE_FILE" --spec=draft2020 -c ajv-formats 2>&1 | grep -A 5 "error"
+            ajv validate -s schema.json --strict-tuples false --strict-types false -d "$file" 2>&1 | grep -A 5 "error"
             ERRORS=$((ERRORS + 1))
-          fi
-          
-          # Clean up temporary JSON file
-          if [[ "$file" =~ \.(yml|yaml)$ ]]; then
-            rm -f "$JSON_FILE"
           fi
         done <<< "$FILES"
         
-        rm -f "$SCHEMA_FILE"
+        rm -f schema.json
         
         echo ""
         echo "=================================================="
-        echo "Validation Summary:"
-        echo "=================================================="
-        echo "Total files found: $TOTAL_FILES"
-        echo "Files validated: $VALIDATED"
-        echo "Files skipped (no schema): $SKIPPED"
-        echo "Valid files: $((VALIDATED - ERRORS))"
+        echo "Total files: $TOTAL_FILES"
+        echo "Valid files: $((TOTAL_FILES - ERRORS))"
         echo "Invalid files: $ERRORS"
         echo "=================================================="
         echo ""
         
         # Set outputs
+        echo "errors=$ERRORS" >> $GITHUB_OUTPUT
+        
         if [ $ERRORS -eq 0 ]; then
           echo "valid=true" >> $GITHUB_OUTPUT
           echo "All files validated successfully!"
@@ -129,12 +97,9 @@ runs:
           echo "valid=false" >> $GITHUB_OUTPUT
           if [ "${{ inputs.fail-on-error }}" = "true" ]; then
             echo "Validation failed!"
-            echo "errors=$ERRORS" >> $GITHUB_OUTPUT
             exit 1
           else
             echo "Validation completed with errors (fail-on-error is disabled)"
           fi
         fi
-        
-        echo "errors=$ERRORS" >> $GITHUB_OUTPUT
 
