@@ -20,7 +20,7 @@ jobs:
       - name: Validate GitHub Workflows
         uses: ./actions/validate-schema
         with:
-          directory: .github/workflows
+          working-directory: .github/workflows
           schema: github-workflow
 
   validate-actions:
@@ -33,7 +33,7 @@ jobs:
       - name: Validate GitHub Actions
         uses: ./actions/validate-schema
         with:
-          directory: actions
+          working-directory: actions
           schema: github-action
           file-pattern: 'action\.ya?ml$'
 

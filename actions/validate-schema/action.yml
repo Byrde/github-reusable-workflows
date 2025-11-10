@@ -10,20 +10,9 @@ inputs:
     required: false
     default: "."
   file-pattern:
-    description: "Regex pattern to match files (e.g. '.*\\.yml$' for YAML files only). If not provided, matches all JSON/YAML/YML files"
+    description: "Regex pattern to filter files (e.g. '*.yaml')"
     required: false
     default: ""
-  fail-on-error:
-    description: "Whether to fail the action if validation errors are found"
-    required: false
-    default: "true"
-outputs:
-  valid:
-    description: "Whether all files passed validation"
-    value: ${{ steps.validate.outputs.valid }}
-  errors:
-    description: "Number of validation errors found"
-    value: ${{ steps.validate.outputs.errors }}
 
 runs:
   using: composite
@@ -33,73 +22,15 @@ runs:
       run: npm install -g ajv-cli ajv-formats
 
     - name: Validate Schema
-      id: validate
       shell: bash
-      working-directory: ${{ inputs.directory }}
-      run: |        
-        SCHEMA_URL="https://json.schemastore.org/${{ inputs.schema }}.json"
-        echo "Using schema: ${{ inputs.schema }} ($SCHEMA_URL)"
-        
-        # Find all JSON/YAML files
-        FILES=$(find . -type f \( -name "*.json" -o -name "*.yml" -o -name "*.yaml" \) ! -path "*/node_modules/*" ! -name "package-lock.json")
-        
-        # Apply file pattern filter if provided
-        FILE_PATTERN="${{ inputs.file-pattern }}"
-        if [ -n "$FILE_PATTERN" ]; then
-          echo "Applying file pattern filter: $FILE_PATTERN"
-          FILES=$(echo "$FILES" | grep -E "$FILE_PATTERN")
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        curl -sSL -o schema.json https://json.schemastore.org/${{ inputs.schema }}.json
+        FILES=$(find . -type f \( -name "*.json" -o -name "*.yml" -o -name "*.yaml" \))
+        if [ -n "${{ inputs.file-pattern }}" ]; then
+          FILES=$(echo "$FILES" | grep -E "${{ inputs.file-pattern }}")
         fi
-        
-        if [ -z "$FILES" ]; then
-          echo "No files found to validate"
-          echo "valid=true" >> $GITHUB_OUTPUT
-          echo "errors=0" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-        
-        TOTAL_FILES=$(echo "$FILES" | wc -l | tr -d ' ')
-        echo "Found $TOTAL_FILES files to validate"
-        echo ""
-        
-        # Download schema
-        curl -sSL -o schema.json "$SCHEMA_URL"
-        
-        ERRORS=0
-        
-        # Validate each file
-        while IFS= read -r file; do
-          if ajv validate -s schema.json --strict-tuples false --strict-types false -d "$file" &>/dev/null; then
-            echo "$file - Valid"
-          else
-            echo "$file - Invalid"
-            ajv validate -s schema.json --strict-tuples false --strict-types false -d "$file" 2>&1 | grep -A 5 "error"
-            ERRORS=$((ERRORS + 1))
-          fi
-        done <<< "$FILES"
-        
-        rm -f schema.json
-        
-        echo ""
-        echo "=================================================="
-        echo "Total files: $TOTAL_FILES"
-        echo "Valid files: $((TOTAL_FILES - ERRORS))"
-        echo "Invalid files: $ERRORS"
-        echo "=================================================="
-        echo ""
-        
-        # Set outputs
-        echo "errors=$ERRORS" >> $GITHUB_OUTPUT
-        
-        if [ $ERRORS -eq 0 ]; then
-          echo "valid=true" >> $GITHUB_OUTPUT
-          echo "All files validated successfully!"
-        else
-          echo "valid=false" >> $GITHUB_OUTPUT
-          if [ "${{ inputs.fail-on-error }}" = "true" ]; then
-            echo "Validation failed!"
-            exit 1
-          else
-            echo "Validation completed with errors (fail-on-error is disabled)"
-          fi
-        fi
+        echo "$FILES" | while read -r file; do
+          ajv validate -s schema.json --strict-tuples false --strict-types false -d "$file"
+        done
 
