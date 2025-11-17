@@ -25,15 +25,6 @@
           "parserOpts": {
             "noteKeywords": ["BREAKING CHANGE", "BREAKING CHANGES"]
           }
-        },
-        "notesGeneratorConfig": {
-          "preset": "angular",
-          "parserOpts": {
-            "noteKeywords": ["BREAKING CHANGE", "BREAKING CHANGES"]
-          },
-          "writerOpts": {
-            "commitsSort": ["subject", "scope"]
-          }
         }
       }
     ],

@@ -6,6 +6,10 @@ inputs:
     description: 'Terraform version to use'
     required: false
     default: '>=1.7'
+  search_path:
+    description: 'Directory path to search for Terraform modules'
+    required: false
+    default: "modules"
   tf_api_token:
     description: 'Terraform Cloud API token'
     required: false
@@ -30,57 +34,101 @@ runs:
       with:
         terraform_version: ${{ inputs.terraform_version }}
 
-    - name: Find & Validate Modules
+    - name: Find Modules
       shell: bash
       run: |
-        # Find all directories with main.tf
-        modules=($(find modules -name "main.tf" -type f | sed 's|/main.tf||' | sort))
-        failed_modules=()
-        successful_modules=()
+        # Find all directories with main.tf (excluding hidden directories and common non-module paths)
+        search_path="${{ inputs.search_path }}"
+        find "$search_path" -name "main.tf" -type f -not -path "*/\.*" | sed 's|/main.tf||' | sort > modules.txt
+        module_count=$(wc -l < modules.txt | tr -d ' ')
         echo "--------------------------------"
-        echo "Found ${#modules[@]} modules to validate"
+        echo "Found $module_count modules to validate"
         echo "--------------------------------"
         echo ""
-        
-        for module_dir in "${modules[@]}"; do
+        cat modules.txt
+
+    - name: Format Check
+      shell: bash
+      run: |
+        failed_modules=()
+        while IFS= read -r module_dir; do
           echo ""
           echo "================================"
-          echo "Validating: $module_dir"
+          echo "Format Check: $module_dir"
           echo "================================"
           
           cd "$module_dir"
-          
-          # Format check
           if ! terraform fmt -check -recursive .; then
             echo "Format check failed for $module_dir"
-            failed_modules+=("$module_dir (format)")
+            failed_modules+=("$module_dir")
             cd - > /dev/null
             continue
           fi
           echo "Format OK!"
+          cd - > /dev/null
+        done < modules.txt
+        
+        if [ ${#failed_modules[@]} -gt 0 ]; then
+          echo ""
+          echo "Failed format checks:"
+          for module in "${failed_modules[@]}"; do
+            echo "  - $module"
+          done
+          exit 1
+        fi
+
+    - name: Init Modules
+      shell: bash
+      run: |
+        failed_modules=()
+        while IFS= read -r module_dir; do
+          echo ""
+          echo "================================"
+          echo "Init: $module_dir"
+          echo "================================"
           
-          # Init
+          cd "$module_dir"
           if ! terraform init -backend=false 2>&1; then
             echo "Init failed for $module_dir"
-            failed_modules+=("$module_dir (init)")
+            failed_modules+=("$module_dir")
             cd - > /dev/null
             continue
           fi
           echo "Init OK!"
+          cd - > /dev/null
+        done < modules.txt
+        
+        if [ ${#failed_modules[@]} -gt 0 ]; then
+          echo ""
+          echo "Failed init:"
+          for module in "${failed_modules[@]}"; do
+            echo "  - $module"
+          done
+          exit 1
+        fi
+
+    - name: Validate Modules
+      shell: bash
+      run: |
+        failed_modules=()
+        successful_modules=()
+        while IFS= read -r module_dir; do
+          echo ""
+          echo "================================"
+          echo "Validate: $module_dir"
+          echo "================================"
           
-          # Validate
+          cd "$module_dir"
           if ! terraform validate 2>&1; then
             echo "Validation failed for $module_dir"
-            failed_modules+=("$module_dir (validate)")
+            failed_modules+=("$module_dir")
             cd - > /dev/null
             continue
           fi
           echo "Validation OK!"
-          echo ""
-          
           successful_modules+=("$module_dir")
           cd - > /dev/null
-        done
+        done < modules.txt
         
         echo ""
         echo "================================"
